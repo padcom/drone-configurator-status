@@ -1,0 +1,6 @@
+[
+  { "number": 92, "title": "Merged last", "merged_at": "2026-11-09T08:00:00Z", "html_url": "https://github.com/padcom/drone-configurator/pull/92" },
+  { "number": 91, "title": "Closed without merging", "merged_at": null, "html_url": "https://github.com/padcom/drone-configurator/pull/91" },
+  { "number": 90, "title": "Merged before", "merged_at": "2026-11-08T10:00:00Z", "html_url": "https://github.com/padcom/drone-configurator/pull/90" },
+  { "number": 93, "title": "Merged long ago", "merged_at": "2026-11-01T10:00:00Z", "html_url": "https://github.com/padcom/drone-configurator/pull/93" }
+]
