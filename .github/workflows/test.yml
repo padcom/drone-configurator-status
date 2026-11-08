@@ -1,0 +1,22 @@
+name: test
+
+# status.yml tests before it builds, but only on the schedule, on pushes to main and by hand. This checks pull requests.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test "scripts/*.test.mjs"
+      - name: Build the page from the fixtures, offline
+        run: node scripts/build.mjs --fixtures scripts/fixtures --out "$RUNNER_TEMP/dist"
+      - name: The page is there
+        run: test -s "$RUNNER_TEMP/dist/index.html" && test -s "$RUNNER_TEMP/dist/style.css" && test -s "$RUNNER_TEMP/dist/data.json"

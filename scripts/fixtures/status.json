@@ -1,0 +1,4 @@
+{
+  "sha104": { "state": "pending", "total_count": 0, "statuses": [] },
+  "sha105": { "state": "success", "total_count": 1, "statuses": [{ "state": "success", "context": "ci/legacy" }] }
+}

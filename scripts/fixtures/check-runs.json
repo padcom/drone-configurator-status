@@ -1,0 +1,25 @@
+{
+  "sha101": {
+    "total_count": 2,
+    "check_runs": [
+      { "status": "completed", "conclusion": "success" },
+      { "status": "completed", "conclusion": "skipped" }
+    ]
+  },
+  "sha102": {
+    "total_count": 2,
+    "check_runs": [
+      { "status": "completed", "conclusion": "success" },
+      { "status": "completed", "conclusion": "failure" }
+    ]
+  },
+  "sha103": {
+    "total_count": 2,
+    "check_runs": [
+      { "status": "completed", "conclusion": "success" },
+      { "status": "in_progress", "conclusion": null }
+    ]
+  },
+  "sha104": { "total_count": 0, "check_runs": [] },
+  "sha105": { "total_count": 0, "check_runs": [] }
+}

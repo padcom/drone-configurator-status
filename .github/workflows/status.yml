@@ -1,0 +1,48 @@
+name: status
+
+on:
+  schedule:
+    - cron: "*/15 * * * *" # GitHub may delay or skip scheduled runs under load; that is fine
+  workflow_dispatch:
+  push:
+    branches: [main] # rebuild when the script or the template changes
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Tests
+        run: node --test "scripts/*.test.mjs"
+      # Exits non-zero before writing dist/ if anything could not be fetched, so nothing below runs and the
+      # last good page stays up.
+      - name: Build the page
+        run: node scripts/build.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

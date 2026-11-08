@@ -1,0 +1,47 @@
+[
+  {
+    "number": 101,
+    "title": "Passing change",
+    "user": { "login": "dev" },
+    "draft": false,
+    "created_at": "2026-11-08T12:00:00Z",
+    "html_url": "https://github.com/padcom/drone-configurator/pull/101",
+    "head": { "sha": "sha101" }
+  },
+  {
+    "number": 102,
+    "title": "Failing draft",
+    "user": { "login": "dev" },
+    "draft": true,
+    "created_at": "2026-11-06T12:00:00Z",
+    "html_url": "https://github.com/padcom/drone-configurator/pull/102",
+    "head": { "sha": "sha102" }
+  },
+  {
+    "number": 103,
+    "title": "Still running",
+    "user": { "login": "other" },
+    "draft": false,
+    "created_at": "2026-11-09T11:30:00Z",
+    "html_url": "https://github.com/padcom/drone-configurator/pull/103",
+    "head": { "sha": "sha103" }
+  },
+  {
+    "number": 104,
+    "title": "No checks, and a link that must not be used",
+    "user": { "login": "other" },
+    "draft": false,
+    "created_at": "2026-11-09T11:59:00Z",
+    "html_url": "javascript:alert(1)",
+    "head": { "sha": "sha104" }
+  },
+  {
+    "number": 105,
+    "title": "Only a commit status",
+    "user": { "login": "dev" },
+    "draft": false,
+    "created_at": "2026-11-09T09:00:00Z",
+    "html_url": "https://github.com/padcom/drone-configurator/pull/105",
+    "head": { "sha": "sha105" }
+  }
+]
