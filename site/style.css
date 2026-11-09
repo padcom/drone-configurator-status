@@ -69,7 +69,8 @@ td progress {
   min-width: 8rem;
 }
 
-.empty {
+.empty,
+.more {
   color: var(--muted);
 }
 

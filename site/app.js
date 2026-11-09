@@ -34,8 +34,10 @@ export const TTL_MS = 60_000
 /** How often the page looks for something newer (3 searches a minute; the limit is 10 a minute per address). */
 export const REFRESH_MS = 60_000
 
-const REPO_NAME = /^[\w.-]+\/[\w.-]+$/u
 const MAX_TITLE = 300
+
+/** The most entries one list shows (the search asks for this many, and a cache or response is cut to it). */
+export const MAX_ITEMS = 50
 
 // ---------------------------------------------------------------------------------------------------------
 // Escaping and links.
@@ -58,28 +60,29 @@ export function safeUrl(url) {
 /** The search for one label, as a path on the API. */
 export function searchPath(label) {
   const query = `${REPOS.map(r => `repo:${r}`).join(' ')} is:issue is:open label:"${label}"`
-  return `/search/issues?q=${encodeURIComponent(query)}&sort=updated&order=desc&per_page=50`
+  return `/search/issues?q=${encodeURIComponent(query)}&sort=updated&order=desc&per_page=${MAX_ITEMS}`
 }
 
 /**
  * An entry as it is kept (and as it is read back from the cache, which is untrusted too): or null if it is not
- * one. Only what the page shows is kept.
+ * one. Only what the page shows is kept. The repository must be one of `REPOS` and the link exactly that issue's
+ * page, which is what a search returns: nothing else gets to point somewhere under a team repository's name.
  */
 export function cleanItem(item) {
   const repo = item?.repo
   const number = item?.number
-  const url = safeUrl(item?.url)
-  if (typeof repo !== 'string' || !REPO_NAME.test(repo) || !Number.isInteger(number) || number < 1 || url === null) {
+  if (typeof repo !== 'string' || !REPOS.includes(repo) || !Number.isInteger(number) || number < 1) {
     return null
   }
-  if (typeof item.title !== 'string') {
+  const url = safeUrl(item.url)
+  if (url !== `https://github.com/${repo}/issues/${number}` || typeof item.title !== 'string') {
     return null
   }
   return { repo, number, title: item.title.slice(0, MAX_TITLE), url }
 }
 
-/** The entries of a search response; pull requests, and anything malformed, are left out. */
-export function itemsOf(response) {
+/** The entries of a search response, at most `limit` (`MAX_ITEMS`); pull requests, and anything malformed, are left out. */
+export function itemsOf(response, limit = MAX_ITEMS) {
   const found = Array.isArray(response?.items) ? response.items : []
   return found
     .filter(i => i && !i.pull_request)
@@ -90,21 +93,61 @@ export function itemsOf(response) {
       url: i.html_url,
     }))
     .filter(Boolean)
+    .slice(0, limit)
 }
 
-/** The HTML of one list: repository, number as a link, title. Everything is escaped. */
-export function renderItems(items) {
-  if (!items || items.length === 0) {
-    return '<p class="empty">Nothing here.</p>'
+/** The Search API never reports more than this many results for a query. */
+export const MAX_RESULTS = 1000
+
+/** A count that is safe to show: a whole number from 0 to `MAX_RESULTS`, else 0. */
+export function countOf(value) {
+  return Number.isInteger(value) && value > 0 ? Math.min(value, MAX_RESULTS) : 0
+}
+
+/** A search whose result GitHub says is partial (`incomplete_results`: its query timed out). */
+export class PartialResultError extends Error {
+  constructor() {
+    super('GitHub returned a partial search result')
+    this.name = 'PartialResultError'
   }
-  const rows = items.map(i => {
+}
+
+/**
+ * A search response as a list: its entries (at most `MAX_ITEMS`), and how many more there are.
+ *
+ * "More" counts what the reader cannot see but could find on GitHub: results the API did not return (`total_count`
+ * beyond the entries it returned, at most `MAX_RESULTS`) and valid entries cut by `MAX_ITEMS`. An entry that was
+ * returned but is not a valid issue of a team repository is neither shown nor counted.
+ *
+ * @throws PartialResultError a partial list must not replace a good one, so it counts as a failed search.
+ */
+export function searchResult(response) {
+  if (response?.incomplete_results === true) {
+    throw new PartialResultError()
+  }
+  const valid = itemsOf(response, Infinity)
+  const items = valid.slice(0, MAX_ITEMS)
+  const returned = Array.isArray(response?.items) ? response.items.length : 0
+  const notReturned = countOf(response?.total_count) - returned
+  return { items, more: countOf(Math.max(0, notReturned) + valid.length - items.length) }
+}
+
+/** The HTML of one list: repository, number as a link, title, and "and N more" if the list is longer. All escaped. */
+export function renderItems(items, more = 0) {
+  const rest = countOf(more)
+  const rows = (items ?? []).slice(0, MAX_ITEMS).map(i => {
     const item = cleanItem(i)
     if (item === null) {
       return ''
     }
     return `<li><span class="repo">${escapeHtml(item.repo)}</span> <a href="${escapeHtml(item.url)}">#${item.number}</a> ${escapeHtml(item.title)}</li>`
-  })
-  return `<ul class="work">${rows.join('')}</ul>`
+  }).filter(Boolean)
+  const tail = rest > 0 ? `<p class="more">and ${rest} more</p>` : ''
+  if (rows.length === 0) {
+    // Nothing to list is "Nothing here" only if there is nothing more either.
+    return tail || '<p class="empty">Nothing here.</p>'
+  }
+  return `<ul class="work">${rows.join('')}</ul>${tail}`
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -115,7 +158,8 @@ export function renderItems(items) {
 /**
  * The cached lists, or null.
  *
- * @returns `{ at, lists }` where `at` is when they were fetched (ms) and `lists` maps a label to its entries
+ * @returns `{ at, lists, more }` where `at` is when they were fetched (ms), `lists` maps a label to its entries (at
+ *   most `MAX_ITEMS` each) and `more` maps it to how many entries there are beyond those
  */
 export function readCache(storage, now) {
   try {
@@ -124,21 +168,23 @@ export function readCache(storage, now) {
       return null
     }
     const lists = {}
+    const more = {}
     for (const { label } of LISTS) {
       if (Array.isArray(parsed.lists[label])) {
-        lists[label] = parsed.lists[label].map(cleanItem).filter(Boolean)
+        lists[label] = parsed.lists[label].slice(0, MAX_ITEMS).map(cleanItem).filter(Boolean)
+        more[label] = countOf(parsed.more?.[label])
       }
     }
-    return { at: Math.min(parsed.at, now), lists }
+    return { at: Math.min(parsed.at, now), lists, more }
   } catch {
     return null
   }
 }
 
-/** Keeps the lists; false if it could not. */
-export function writeCache(storage, lists, now) {
+/** Keeps the lists (and how many more each has); false if it could not. */
+export function writeCache(storage, lists, now, more = {}) {
   try {
-    storage.setItem(CACHE_KEY, JSON.stringify({ at: now, lists }))
+    storage.setItem(CACHE_KEY, JSON.stringify({ at: now, lists, more }))
     return true
   } catch {
     return false
@@ -182,7 +228,8 @@ async function search(label, fetchImpl) {
     return { problem: UNREACHABLE }
   }
   try {
-    return { items: itemsOf(await response.json()) }
+    // A body that isn't JSON, and a partial result, are both a search that failed.
+    return searchResult(await response.json())
   } catch {
     return { problem: UNREACHABLE }
   }
@@ -196,28 +243,31 @@ async function search(label, fetchImpl) {
  * @param options.storage localStorage, or null
  * @param options.now the time in ms
  * @param options.lists the lists shown now (the last result), by label
+ * @param options.more how many entries each of those has beyond what is listed, by label
  * @param options.at when they were fetched, or null
- * @returns `{ lists, at, notice }`: `notice` is a text for the reader, or null
+ * @returns `{ lists, more, at, notice }`: `notice` is a text for the reader, or null
  */
-export async function refresh({ fetchImpl, storage, now, lists = {}, at = null }) {
+export async function refresh({ fetchImpl, storage, now, lists = {}, more = {}, at = null }) {
   const results = await Promise.all(LISTS.map(async ({ label }) => [label, await search(label, fetchImpl)]))
   const merged = { ...lists }
+  const mergedMore = { ...more }
   let problem = null
   for (const [label, result] of results) {
     if (result.items) {
       merged[label] = result.items
+      mergedMore[label] = result.more
     } else {
       // A rate limit is the more useful thing to say.
       problem = problem === RATE_LIMITED ? problem : result.problem
     }
   }
   if (problem !== null) {
-    return { lists: merged, at, notice: NOTICES[problem] }
+    return { lists: merged, more: mergedMore, at, notice: NOTICES[problem] }
   }
   if (storage) {
-    writeCache(storage, merged, now)
+    writeCache(storage, merged, now, mergedMore)
   }
-  return { lists: merged, at: now, notice: null }
+  return { lists: merged, more: mergedMore, at: now, notice: null }
 }
 
 /** "updated 12 s ago" */
@@ -238,7 +288,7 @@ export function updatedText(at, now) {
  * `#work-updated` and `#work-notice`.
  */
 export function start({ document, fetchImpl, storage, now = Date.now, setTimer = setInterval }) {
-  let current = { lists: {}, at: null }
+  let current = { lists: {}, more: {}, at: null }
   let notice = null
 
   function draw() {
@@ -246,7 +296,7 @@ export function start({ document, fetchImpl, storage, now = Date.now, setTimer =
       const label = el.getAttribute('data-work-label')
       // A list never fetched keeps the snapshot that is in the page.
       if (current.lists[label]) {
-        el.innerHTML = renderItems(current.lists[label])
+        el.innerHTML = renderItems(current.lists[label], current.more[label])
       }
     }
     const updated = document.getElementById('work-updated')
@@ -263,7 +313,7 @@ export function start({ document, fetchImpl, storage, now = Date.now, setTimer =
   function fromCache() {
     const cached = storage ? readCache(storage, now()) : null
     if (cached && (current.at === null || cached.at > current.at)) {
-      current = { lists: { ...current.lists, ...cached.lists }, at: cached.at }
+      current = { lists: { ...current.lists, ...cached.lists }, more: { ...current.more, ...cached.more }, at: cached.at }
     }
   }
 
@@ -271,8 +321,8 @@ export function start({ document, fetchImpl, storage, now = Date.now, setTimer =
     // Another tab may just have fetched: its result is as good as ours.
     fromCache()
     if (current.at === null || now() - current.at >= TTL_MS) {
-      const next = await refresh({ fetchImpl, storage, now: now(), lists: current.lists, at: current.at })
-      current = { lists: next.lists, at: next.at }
+      const next = await refresh({ fetchImpl, storage, now: now(), lists: current.lists, more: current.more, at: current.at })
+      current = { lists: next.lists, more: next.more, at: next.at }
       notice = next.notice
     } else {
       notice = null

@@ -1,11 +1,12 @@
 // node --test scripts/
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, readFile, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { searchResult } from '../site/app.js'
 import { build, collect, escapeHtml, fixtureSource, githubClient, reduceChecks, render, safeUrl, summarize } from './build.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -316,9 +317,84 @@ test('searches for the issues in flight with the labels and the repositories, an
     urls.push(decodeURIComponent(url))
     return { ok: true, status: 200, headers: { get: () => null }, json: async () => JSON.parse(await readFile(join(FIXTURES, 'search-in-review.json'), 'utf8')) }
   }
-  const items = await githubClient({ fetchImpl }).labelled('in review')
+  const { items, more } = await githubClient({ fetchImpl }).labelled('in review')
   assert.deepEqual(items, [{ repo: 'padcom/pico-mavlink', number: 11, title: 'Rate manager', url: 'https://github.com/padcom/pico-mavlink/issues/11' }])
+  assert.equal(more, 0)
   assert.match(urls[0], /^https:\/\/api\.github\.com\/search\/issues\?q=repo:padcom\/pico-lang repo:padcom\/pico-desktop repo:padcom\/pico-serialport repo:padcom\/pico-mavlink repo:padcom\/drone-configurator is:issue is:open label:"in review"&/u)
+})
+
+/** The responses of a build whose issues, pull requests and searches come one after the other (searches last). */
+const buildScript = (...searches) => {
+  const few = Array.from({ length: 3 }, (_, i) => ({ number: i + 1, title: 'x', state: 'open', labels: [] }))
+
+  return scriptedFetch([[200, few], [200, []], [200, []], ...searches])
+}
+const emptySearch = [200, { total_count: 0, incomplete_results: false, items: [] }]
+
+test('writes nothing, and keeps the last page, when the issues come but a search fails', async () => {
+  for (const failure of [[403, {}], [500, {}], [200, undefined]]) {
+    const out = join(await mkdtemp(join(tmpdir(), 'status-')), 'dist')
+    // The failure is given twice: a 5xx is tried once more.
+    const fetchImpl = buildScript(emptySearch, failure, failure, emptySearch)
+    const source = githubClient({ fetchImpl, pause: noPause })
+    await assert.rejects(build({ source, out, minIssues: 1, now: NOW }), /search\/issues|JSON/u)
+    assert.equal(await exists(out), false, `status ${failure[0]}`)
+  }
+})
+
+test('treats a partial search result as a failed search, after trying once more', async () => {
+  const partial = [200, { total_count: 4, incomplete_results: true, items: [] }]
+  const waits = []
+  const pause = async ms => waits.push(ms)
+
+  // Partial twice: the build fails and writes nothing.
+  const out = join(await mkdtemp(join(tmpdir(), 'status-')), 'dist')
+  const fetchImpl = buildScript(partial, partial)
+  await assert.rejects(build({ source: githubClient({ fetchImpl, pause }), out, minIssues: 1, now: NOW }), /partial/u)
+  assert.deepEqual(waits, [5000])
+  assert.equal(fetchImpl.calls, 5)
+  assert.equal(await exists(out), false)
+
+  // Partial once, then whole: the whole one is used.
+  const whole = [200, { total_count: 0, incomplete_results: false, items: [] }]
+  const again = githubClient({ fetchImpl: scriptedFetch([partial, whole]), pause })
+  assert.deepEqual(await again.labelled('in progress'), { items: [], more: 0 })
+})
+
+test('a partial result in the fixtures fails the build too', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'status-fixtures-'))
+  await writeFile(join(dir, 'search-testing.json'), JSON.stringify({ total_count: 1, incomplete_results: true, items: [] }))
+  await assert.rejects(fixtureSource(dir).labelled('testing'), /partial/u)
+})
+
+test('the snapshot says "and N more" when a list is longer than what is shown', async () => {
+  const data = await collect(fixtureSource(FIXTURES), { minIssues: 1 })
+  const html = render(summarize(data.issues, data.pulls, data.checks, NOW, data.work, { 'in review': 7 }), await readFile(join(HERE, '..', 'site', 'index.html'), 'utf8'))
+  assert.match(html, /data-work-label="in review">.*<p class="more">and 7 more<\/p>/su)
+  assert.ok(!/and \d+ more/u.test(/data-work-label="testing">(.*?)<\/div>/su.exec(html)[1]))
+})
+
+test('the offline build shows 50 of 80 returned entries and "and 30 more"; a rejected entry is not "more"', async () => {
+  const entry = n => ({
+    number: n,
+    title: `Issue ${n}`,
+    html_url: `https://github.com/padcom/pico-lang/issues/${n}`,
+    repository_url: 'https://api.github.com/repos/padcom/pico-lang',
+  })
+  const eighty = { total_count: 80, incomplete_results: false, items: Array.from({ length: 80 }, (_, i) => entry(i + 1)) }
+  const base = fixtureSource(FIXTURES)
+  const source = { ...base, labelled: async label => label === 'testing' ? searchResult(eighty) : base.labelled(label) }
+  const out = join(await mkdtemp(join(tmpdir(), 'status-')), 'dist')
+  await build({ source, out, minIssues: 1, now: NOW })
+
+  const html = await readFile(join(out, 'index.html'), 'utf8')
+  const section = label => new RegExp(`data-work-label="${label}">(.*?)</div>`, 'su').exec(html)[1]
+  assert.equal(section('testing').match(/<li>/gu).length, 50)
+  assert.match(section('testing'), /<p class="more">and 30 more<\/p>/u)
+  // The in-progress fixture returns 3 entries, one with a javascript: link: 2 listed, and no "more".
+  assert.equal(section('in progress').match(/<li>/gu).length, 2)
+  assert.ok(!section('in progress').includes('more'))
+  assert.equal(JSON.parse(await readFile(join(out, 'data.json'), 'utf8')).workMore.testing, 30)
 })
 
 test('reads every page of issues, until a short one', async () => {

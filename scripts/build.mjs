@@ -9,7 +9,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { LISTS, REPOS, escapeHtml, itemsOf, renderItems, safeUrl, searchPath } from '../site/app.js'
+import { LISTS, PartialResultError, REPOS, escapeHtml, renderItems, safeUrl, searchPath, searchResult } from '../site/app.js'
 
 // The escaping and the lists are the page script's own (site/app.js), so the snapshot in the HTML and what the script
 // draws later are made by the same code.
@@ -133,7 +133,7 @@ function ageText(from, now) {
  * @param now the time the page is made, as a Date
  * @param work `{ [label]: entries }`: the snapshot of the lists of work in flight (see `LISTS`)
  */
-export function summarize(issues, pulls, checks, now, work = {}) {
+export function summarize(issues, pulls, checks, now, work = {}, workMore = {}) {
   const real = issues.filter(i => !i.pull_request)
   const counted = []
   let notPlanned = 0
@@ -190,8 +190,18 @@ export function summarize(issues, pulls, checks, now, work = {}) {
     .map(p => ({ number: p.number, title: p.title, mergedAt: p.merged_at.slice(0, 10), url: p.html_url }))
 
   const snapshot = Object.fromEntries(LISTS.map(({ label }) => [label, work[label] ?? []]))
+  const snapshotMore = Object.fromEntries(LISTS.map(({ label }) => [label, workMore[label] ?? 0]))
 
-  return { generatedAt: now.toISOString(), overall, areas, pulls: openPulls, merges, work: snapshot, left: { notPlanned, duplicate, hidden } }
+  return {
+    generatedAt: now.toISOString(),
+    overall,
+    areas,
+    pulls: openPulls,
+    merges,
+    work: snapshot,
+    workMore: snapshotMore,
+    left: { notPlanned, duplicate, hidden },
+  }
 }
 
 function link(url, text) {
@@ -270,7 +280,7 @@ export function render(summary, template, meta = {}) {
     + `${left.duplicate ?? 0} closed as duplicate, ${left.hidden} in the hardware area.`
   const commit = meta.commit ?? 'unknown'
   const work = Object.fromEntries(
-    LISTS.map(({ label, placeholder }) => [placeholder, new Raw(renderItems(summary.work?.[label]))]),
+    LISTS.map(({ label, placeholder }) => [placeholder, new Raw(renderItems(summary.work?.[label], summary.workMore?.[label]))]),
   )
   const values = {
     ...work,
@@ -359,9 +369,23 @@ export function githubClient({ token, fetchImpl = fetch, pause = sleep, log = ()
       }
       throw new Error('more than 50 pages of issues: refusing to go on')
     },
-    /** The snapshot of one list of work in flight: the same search the page makes, as the page's script would. */
+    /**
+     * The snapshot of one list of work in flight: the same search the page makes, as the page's script would.
+     * A partial result (`incomplete_results`) is searched for once more after 5 s, and is an error if it is partial again.
+     *
+     * @returns `{ items, more }`
+     */
     async labelled(label) {
-      return itemsOf(await get(searchPath(label)))
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return searchResult(await get(searchPath(label)))
+        } catch (error) {
+          if (attempt > 0 || !(error instanceof PartialResultError)) {
+            throw error
+          }
+          await pause(5000)
+        }
+      }
     },
     openPulls: () => get(`/repos/${REPO}/pulls?state=open&per_page=100`),
     closedPulls: () => get(`/repos/${REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=50`),
@@ -385,7 +409,7 @@ export function fixtureSource(dir) {
     }
   }
   return {
-    labelled: async label => itemsOf(await readSearch(label)),
+    labelled: async label => searchResult(await readSearch(label)),
     issues: () => read('issues.json'),
     openPulls: () => read('pulls-open.json'),
     closedPulls: () => read('pulls-closed.json'),
@@ -422,10 +446,13 @@ export async function collect(source, { minIssues = MIN_ISSUES } = {}) {
     checks[sha] = { checkRuns, status }
   }
   const work = {}
+  const workMore = {}
   for (const { label } of LISTS) {
-    work[label] = await source.labelled(label)
+    const { items, more } = await source.labelled(label)
+    work[label] = items
+    workMore[label] = more
   }
-  return { issues, pulls: { open, closed }, checks, work }
+  return { issues, pulls: { open, closed }, checks, work, workMore }
 }
 
 /**
@@ -435,7 +462,7 @@ export async function collect(source, { minIssues = MIN_ISSUES } = {}) {
  */
 export async function build({ source, out, minIssues, now = new Date(), commit = 'unknown' }) {
   const data = await collect(source, { minIssues })
-  const summary = summarize(data.issues, data.pulls, data.checks, now, data.work)
+  const summary = summarize(data.issues, data.pulls, data.checks, now, data.work, data.workMore)
   const template = await readFile(join(HERE, '..', 'site', 'index.html'), 'utf8')
   const style = await readFile(join(HERE, '..', 'site', 'style.css'), 'utf8')
   const script = await readFile(join(HERE, '..', 'site', 'app.js'), 'utf8')
