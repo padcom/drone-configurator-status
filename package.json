@@ -1,0 +1,12 @@
+{
+  "name": "drone-configurator-status",
+  "private": true,
+  "type": "module",
+  "description": "The status page of padcom/drone-configurator",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"scripts/*.test.mjs\""
+  }
+}
