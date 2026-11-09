@@ -42,11 +42,39 @@ function scriptedFetch(script) {
 
 const noPause = async () => {}
 
-test('counts the issues, leaving out pull requests, not-planned issues and the hardware area', async () => {
+test('counts the issues, leaving out pull requests, not-planned and duplicate issues and the hardware area', async () => {
   const s = await fixtureSummary()
-  // 15 entries: one is a pull request, one is closed as not planned, two are in the hardware area.
+  // 16 entries: one is a pull request, one is closed as not planned, one as a duplicate, two are in the hardware area.
   assert.deepEqual(s.overall, { open: 7, closed: 4, total: 11, percent: 36 })
-  assert.deepEqual(s.left, { notPlanned: 1, hidden: 2 })
+  assert.deepEqual(s.left, { notPlanned: 1, duplicate: 1, hidden: 2 })
+})
+
+test('leaves an issue closed as a duplicate out of the total and out of its area, like one closed as not planned', () => {
+  const issue = (number, state, state_reason, area = 'link') => ({ number, state, state_reason, labels: [{ name: `area: ${area}` }] })
+  const s = summarize(
+    [issue(1, 'closed', 'completed'), issue(2, 'open', null), issue(3, 'closed', 'duplicate'), issue(4, 'closed', 'not_planned')],
+    { open: [], closed: [] },
+    {},
+    NOW,
+  )
+  assert.deepEqual(s.overall, { open: 1, closed: 1, total: 2, percent: 50 })
+  assert.deepEqual(s.areas.map(a => [a.name, a.open, a.closed]), [['link', 1, 1]])
+  assert.deepEqual(s.left, { notPlanned: 1, duplicate: 1, hidden: 0 })
+  // An open issue is never "closed as a duplicate"; only a closed one is.
+  assert.equal(summarize([issue(5, 'open', 'duplicate')], { open: [], closed: [] }, {}, NOW).overall.total, 1)
+})
+
+test('rounds the percentage, but shows 100% only when everything is closed', () => {
+  const issues = (closed, open) => [
+    ...Array.from({ length: closed }, (_, i) => ({ number: i + 1, state: 'closed', state_reason: 'completed', labels: [] })),
+    ...Array.from({ length: open }, (_, i) => ({ number: closed + i + 1, state: 'open', state_reason: null, labels: [] })),
+  ]
+  const percentOf = (closed, open) => summarize(issues(closed, open), { open: [], closed: [] }, {}, NOW).overall.percent
+  assert.equal(percentOf(264, 1), 99)
+  assert.equal(percentOf(199, 1), 99)
+  assert.equal(percentOf(265, 0), 100)
+  assert.equal(percentOf(2, 1), 67)
+  assert.equal(percentOf(0, 0), 0)
 })
 
 test('lists the areas in the set order, new areas after, issues with no area last', async () => {
@@ -134,7 +162,7 @@ test('renders the page with the numbers, and nothing from GitHub unescaped', asy
   assert.match(html, /<p class="big">36%<\/p>/u)
   assert.match(html, /commit abcdef1\./u)
   assert.match(html, /Generated at 2026-11-09 12:00:00 UTC/u)
-  assert.match(html, /1 issue closed as not planned, 2 in the hardware area/u)
+  assert.match(html, /1 issue closed as not planned, 1 closed as duplicate, 2 in the hardware area/u)
   assert.ok(!html.includes('<img src=x'))
   assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'))
   assert.ok(!/\{\{/u.test(html))
@@ -150,13 +178,49 @@ test('escapes an issue title that is a script tag', async () => {
   const s = await fixtureSummary()
   s.merges[0].title = '<script>alert(1)</script>'
   const html = render(s, template)
-  assert.ok(!/<script/iu.test(html))
+  // The page has one script, the external app.js; no other.
+  assert.ok(!/<script/iu.test(html.replace('<script type="module" src="app.js"></script>', '')))
   assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'))
 })
 
 test('refuses a template with a placeholder it has no value for', async () => {
   const s = await fixtureSummary()
   assert.throws(() => render(s, '<p>{{nothing_like_this}}</p>'), /nothing_like_this/u)
+})
+
+test('the page has a snapshot of the lists of work in flight, for readers without JavaScript', async () => {
+  const template = await readFile(join(HERE, '..', 'site', 'index.html'), 'utf8')
+  const data = await collect(fixtureSource(FIXTURES), { minIssues: 1 })
+  const html = render(summarize(data.issues, data.pulls, data.checks, NOW, data.work), template)
+  const section = label => new RegExp(`data-work-label="${label}">(.*?)</div>`, 'su').exec(html)[1]
+  // Each entry: repository, number as a link, title.
+  assert.match(section('in progress'), /<span class="repo">padcom\/pico-desktop<\/span> <a href="https:\/\/github\.com\/padcom\/pico-desktop\/issues\/52">#52<\/a> A Vue 3 template/u)
+  assert.match(section('in review'), /padcom\/pico-mavlink.*#11<\/a> Rate manager/su)
+  assert.match(section('testing'), /Nothing here\./u)
+  // Hostile data is text: the title is escaped and the entry with a javascript: link is dropped.
+  assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'))
+  assert.ok(!html.includes('<img src=x'))
+  assert.ok(!html.includes('javascript:'))
+  assert.ok(!html.includes('A link that must not be followed'))
+})
+
+test('the page loads one script from its own origin, has no inline script, and allows only api.github.com to connect to', async () => {
+  const out = join(await mkdtemp(join(tmpdir(), 'status-')), 'dist')
+  await build({ source: fixtureSource(FIXTURES), out, minIssues: 1, now: NOW, commit: 'abcdef1234' })
+  const html = await readFile(join(out, 'index.html'), 'utf8')
+  assert.deepEqual([...html.matchAll(/<script([^>]*)>/gu)].map(m => m[1].trim()), ['type="module" src="app.js"'])
+  assert.ok(!/<script[^>]*>[^<]/u.test(html))
+  // No event handler or style attribute on any tag (escaped text such as `onerror=` in a title is not a tag).
+  assert.ok(!/<[a-z][^>]*\s(on[a-z]+|style)\s*=/iu.test(html))
+  const csp = /http-equiv="Content-Security-Policy"\s+content="([^"]*)"/u.exec(html)[1]
+  assert.match(csp, /(^|; )script-src 'self'(;|$)/u)
+  assert.match(csp, /(^|; )connect-src https:\/\/api\.github\.com(;|$)/u)
+  assert.match(csp, /(^|; )default-src 'none'(;|$)/u)
+  assert.ok(!csp.includes('unsafe'))
+  // The script is deployed with the page, and holds no token.
+  const script = await readFile(join(out, 'app.js'), 'utf8')
+  assert.ok(script.length > 0)
+  assert.ok(!/authorization|bearer|ghp_|github_pat_/iu.test(script))
 })
 
 test('writes the page, its style and the numbers', async () => {
@@ -213,9 +277,53 @@ test('tries once more after a server error, or a 403 that says to retry, and no 
   assert.equal(missing.calls, 1)
 })
 
+test('tries once more after a network error or a timeout, and gives every request a timeout', async () => {
+  const waits = []
+  const pause = async ms => waits.push(ms)
+  let calls = 0
+  const signals = []
+  const flaky = async (url, init) => {
+    signals.push(init.signal instanceof AbortSignal)
+    calls += 1
+    if (calls === 1) {
+      throw new TypeError('fetch failed')
+    }
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => [] }
+  }
+  await githubClient({ fetchImpl: flaky, pause }).openPulls()
+  assert.equal(calls, 2)
+  assert.deepEqual(waits, [5000])
+  assert.deepEqual(signals, [true, true])
+
+  const down = async () => {
+    throw new TypeError('fetch failed')
+  }
+  await assert.rejects(githubClient({ fetchImpl: down, pause }).openPulls(), /fetch failed/u)
+})
+
+test('lists an issue once even if a page shifted while the pages were read', async () => {
+  const hundred = from => Array.from({ length: 100 }, (_, i) => ({ number: from + i }))
+  // Page 2 starts with #100 again: an issue was created between the two requests.
+  const fetchImpl = scriptedFetch([[200, hundred(1)], [200, hundred(100).slice(0, 5)]])
+  const issues = await githubClient({ fetchImpl, pause: noPause }).issues()
+  assert.equal(issues.length, 104)
+  assert.equal(new Set(issues.map(i => i.number)).size, 104)
+})
+
+test('searches for the issues in flight with the labels and the repositories, and keeps what the page shows', async () => {
+  const urls = []
+  const fetchImpl = async url => {
+    urls.push(decodeURIComponent(url))
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => JSON.parse(await readFile(join(FIXTURES, 'search-in-review.json'), 'utf8')) }
+  }
+  const items = await githubClient({ fetchImpl }).labelled('in review')
+  assert.deepEqual(items, [{ repo: 'padcom/pico-mavlink', number: 11, title: 'Rate manager', url: 'https://github.com/padcom/pico-mavlink/issues/11' }])
+  assert.match(urls[0], /^https:\/\/api\.github\.com\/search\/issues\?q=repo:padcom\/pico-lang repo:padcom\/pico-desktop repo:padcom\/pico-serialport repo:padcom\/pico-mavlink repo:padcom\/drone-configurator is:issue is:open label:"in review"&/u)
+})
+
 test('reads every page of issues, until a short one', async () => {
-  const page = n => Array.from({ length: n }, (_, i) => ({ number: i }))
-  const fetchImpl = scriptedFetch([[200, page(100)], [200, page(100)], [200, page(5)]])
+  const page = (n, from) => Array.from({ length: n }, (_, i) => ({ number: from + i }))
+  const fetchImpl = scriptedFetch([[200, page(100, 1)], [200, page(100, 101)], [200, page(5, 201)]])
   const issues = await githubClient({ fetchImpl, pause: noPause }).issues()
   assert.equal(issues.length, 205)
   assert.equal(fetchImpl.calls, 3)

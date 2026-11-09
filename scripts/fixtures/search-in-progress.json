@@ -1,0 +1,30 @@
+{
+  "total_count": 3,
+  "incomplete_results": false,
+  "items": [
+    {
+      "number": 52,
+      "title": "A Vue 3 template",
+      "html_url": "https://github.com/padcom/pico-desktop/issues/52",
+      "repository_url": "https://api.github.com/repos/padcom/pico-desktop",
+      "state": "open",
+      "labels": [{ "name": "in progress" }]
+    },
+    {
+      "number": 7,
+      "title": "<img src=x onerror=alert(1)>",
+      "html_url": "https://github.com/padcom/pico-mavlink/issues/7",
+      "repository_url": "https://api.github.com/repos/padcom/pico-mavlink",
+      "state": "open",
+      "labels": [{ "name": "in progress" }]
+    },
+    {
+      "number": 9,
+      "title": "A link that must not be followed",
+      "html_url": "javascript:alert(1)",
+      "repository_url": "https://api.github.com/repos/padcom/pico-lang",
+      "state": "open",
+      "labels": [{ "name": "in progress" }]
+    }
+  ]
+}

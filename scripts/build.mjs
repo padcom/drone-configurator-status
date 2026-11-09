@@ -4,11 +4,19 @@
 //   node scripts/build.mjs --fixtures DIR        no network: the data from DIR (see scripts/fixtures)
 //   node scripts/build.mjs --out DIR             where to write (default: dist)
 //
-// Node >= 20, built-ins only. The page is written only when everything was fetched and rendered: a failed
+// Node >= 22, built-ins only. The page is written only when everything was fetched and rendered: a failed
 // fetch exits non-zero before anything is written, so the deploy step is skipped and the last good page stays up.
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { LISTS, REPOS, escapeHtml, itemsOf, renderItems, safeUrl, searchPath } from '../site/app.js'
+
+// The escaping and the lists are the page script's own (site/app.js), so the snapshot in the HTML and what the script
+// draws later are made by the same code.
+export { escapeHtml, safeUrl }
+
+/** How long a request to GitHub may take before it is given up on. */
+export const REQUEST_TIMEOUT_MS = 30_000
 
 const API = 'https://api.github.com'
 const REPO = 'padcom/drone-configurator'
@@ -46,11 +54,6 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 // Pure functions: data in, data or HTML out.
 // ---------------------------------------------------------------------------------------------------------
 
-/** HTML-escapes text. Everything from GitHub (titles, names) is untrusted. */
-export function escapeHtml(text) {
-  return String(text).replace(/[&<>"']/gu, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch])
-}
-
 /** Markup that is already safe: the only kind `render` inserts without escaping. */
 export class Raw {
   constructor(html) {
@@ -58,13 +61,12 @@ export class Raw {
   }
 }
 
-/** A link target is used only if it is an https URL on github.com. */
-export function safeUrl(url) {
-  return typeof url === 'string' && /^https:\/\/github\.com\/[\w./#?=&%-]*$/u.test(url) ? url : null
-}
-
+/** Rounded, but never 100 until everything is closed (264 of 265 is 99%, not 100%). */
 function percent(closed, total) {
-  return total === 0 ? 0 : Math.round((100 * closed) / total)
+  if (total === 0) {
+    return 0
+  }
+  return closed === total ? 100 : Math.min(99, Math.round((100 * closed) / total))
 }
 
 function labelNames(issue) {
@@ -129,15 +131,19 @@ function ageText(from, now) {
  * @param pulls `{ open, closed }`: the open pull requests and the recently closed ones
  * @param checks `{ [sha]: { checkRuns, status } }` for the open pull requests
  * @param now the time the page is made, as a Date
+ * @param work `{ [label]: entries }`: the snapshot of the lists of work in flight (see `LISTS`)
  */
-export function summarize(issues, pulls, checks, now) {
+export function summarize(issues, pulls, checks, now, work = {}) {
   const real = issues.filter(i => !i.pull_request)
   const counted = []
   let notPlanned = 0
+  let duplicate = 0
   let hidden = 0
   for (const issue of real) {
     if (issue.state === 'closed' && issue.state_reason === 'not_planned') {
       notPlanned += 1
+    } else if (issue.state === 'closed' && issue.state_reason === 'duplicate') {
+      duplicate += 1
     } else if (areasOf(issue).some(a => HIDDEN_AREAS.includes(a))) {
       hidden += 1
     } else {
@@ -183,7 +189,9 @@ export function summarize(issues, pulls, checks, now) {
     .slice(0, 20)
     .map(p => ({ number: p.number, title: p.title, mergedAt: p.merged_at.slice(0, 10), url: p.html_url }))
 
-  return { generatedAt: now.toISOString(), overall, areas, pulls: openPulls, merges, left: { notPlanned, hidden } }
+  const snapshot = Object.fromEntries(LISTS.map(({ label }) => [label, work[label] ?? []]))
+
+  return { generatedAt: now.toISOString(), overall, areas, pulls: openPulls, merges, work: snapshot, left: { notPlanned, duplicate, hidden } }
 }
 
 function link(url, text) {
@@ -258,9 +266,16 @@ export function render(summary, template, meta = {}) {
     ),
   )
   const left = summary.left
-  const notes = `Not counted: ${left.notPlanned} issue${left.notPlanned === 1 ? '' : 's'} closed as not planned, ${left.hidden} in the hardware area.`
+  const notes = `Not counted: ${left.notPlanned} issue${left.notPlanned === 1 ? '' : 's'} closed as not planned, `
+    + `${left.duplicate ?? 0} closed as duplicate, ${left.hidden} in the hardware area.`
   const commit = meta.commit ?? 'unknown'
+  const work = Object.fromEntries(
+    LISTS.map(({ label, placeholder }) => [placeholder, new Raw(renderItems(summary.work?.[label]))]),
+  )
   const values = {
+    ...work,
+    work_repos: new Raw(REPOS.map(r => link(`https://github.com/${r}`, r)).join(', ')),
+    work_note: `Showing the state at ${summary.generatedAt.replace('T', ' ').replace(/\.\d+Z$/u, '')} UTC until the live lists load.`,
     overall,
     areas,
     pulls,
@@ -287,8 +302,9 @@ export function render(summary, template, meta = {}) {
 const sleep = ms => new Promise(done => setTimeout(done, ms))
 
 /**
- * A client for the REST API. Retries once after 5 s on a 5xx or on a 403 that says to retry later; any other
- * non-2xx, or a body that is not JSON, is an error.
+ * A client for the REST API. Every request is given up on after `REQUEST_TIMEOUT_MS`. Retries once after 5 s on a
+ * network error or timeout, a 5xx, or a 403 that says to retry later; any other non-2xx, or a body that is not JSON,
+ * is an error.
  */
 export function githubClient({ token, fetchImpl = fetch, pause = sleep, log = () => {} } = {}) {
   async function get(path) {
@@ -297,7 +313,16 @@ export function githubClient({ token, fetchImpl = fetch, pause = sleep, log = ()
       headers.authorization = `Bearer ${token}`
     }
     for (let attempt = 0; ; attempt += 1) {
-      const response = await fetchImpl(`${API}${path}`, { headers })
+      let response
+      try {
+        response = await fetchImpl(`${API}${path}`, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+      } catch (error) {
+        if (attempt === 0) {
+          await pause(5000)
+          continue
+        }
+        throw new Error(`GET ${path} failed: ${error.message}`)
+      }
       const remaining = response.headers?.get?.('x-ratelimit-remaining')
       if (remaining !== null && remaining !== undefined) {
         log(`GET ${path}: ${response.status}, rate limit remaining ${remaining}`)
@@ -328,10 +353,15 @@ export function githubClient({ token, fetchImpl = fetch, pause = sleep, log = ()
         }
         all.push(...items)
         if (items.length < 100) {
-          return all
+          // Listed by creation, so an issue created while this runs can shift a page and appear twice.
+          return [...new Map(all.map(i => [i.number, i])).values()]
         }
       }
       throw new Error('more than 50 pages of issues: refusing to go on')
+    },
+    /** The snapshot of one list of work in flight: the same search the page makes, as the page's script would. */
+    async labelled(label) {
+      return itemsOf(await get(searchPath(label)))
     },
     openPulls: () => get(`/repos/${REPO}/pulls?state=open&per_page=100`),
     closedPulls: () => get(`/repos/${REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=50`),
@@ -343,7 +373,19 @@ export function githubClient({ token, fetchImpl = fetch, pause = sleep, log = ()
 /** The same interface over a directory of JSON files (see scripts/fixtures). */
 export function fixtureSource(dir) {
   const read = async name => JSON.parse(await readFile(join(dir, name), 'utf8'))
+  const readSearch = async label => {
+    try {
+      return await read(`search-${label.replaceAll(' ', '-')}.json`)
+    } catch (error) {
+      // A fixture set with no file for a label has nothing in that list.
+      if (error.code === 'ENOENT') {
+        return { items: [] }
+      }
+      throw error
+    }
+  }
   return {
+    labelled: async label => itemsOf(await readSearch(label)),
     issues: () => read('issues.json'),
     openPulls: () => read('pulls-open.json'),
     closedPulls: () => read('pulls-closed.json'),
@@ -379,7 +421,11 @@ export async function collect(source, { minIssues = MIN_ISSUES } = {}) {
     const status = (checkRuns?.check_runs ?? []).length === 0 ? await source.status(sha) : null
     checks[sha] = { checkRuns, status }
   }
-  return { issues, pulls: { open, closed }, checks }
+  const work = {}
+  for (const { label } of LISTS) {
+    work[label] = await source.labelled(label)
+  }
+  return { issues, pulls: { open, closed }, checks, work }
 }
 
 /**
@@ -389,14 +435,16 @@ export async function collect(source, { minIssues = MIN_ISSUES } = {}) {
  */
 export async function build({ source, out, minIssues, now = new Date(), commit = 'unknown' }) {
   const data = await collect(source, { minIssues })
-  const summary = summarize(data.issues, data.pulls, data.checks, now)
+  const summary = summarize(data.issues, data.pulls, data.checks, now, data.work)
   const template = await readFile(join(HERE, '..', 'site', 'index.html'), 'utf8')
   const style = await readFile(join(HERE, '..', 'site', 'style.css'), 'utf8')
+  const script = await readFile(join(HERE, '..', 'site', 'app.js'), 'utf8')
   const html = render(summary, template, { commit })
   // Only now, with every step behind us, is anything written.
   await mkdir(out, { recursive: true })
   await writeFile(join(out, 'index.html'), html)
   await writeFile(join(out, 'style.css'), style)
+  await writeFile(join(out, 'app.js'), script)
   await writeFile(join(out, 'data.json'), `${JSON.stringify(summary, null, 2)}\n`)
   return summary
 }

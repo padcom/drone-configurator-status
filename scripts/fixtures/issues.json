@@ -20,5 +20,6 @@
     "labels": [{ "name": "area: foundation" }],
     "pull_request": { "url": "https://api.github.com/repos/padcom/drone-configurator/pulls/14" }
   },
-  { "number": 15, "title": "<script>alert(1)</script>", "state": "open", "state_reason": null, "labels": [{ "name": "area: link" }] }
+  { "number": 15, "title": "<script>alert(1)</script>", "state": "open", "state_reason": null, "labels": [{ "name": "area: link" }] },
+  { "number": 16, "title": "Link duplicate", "state": "closed", "state_reason": "duplicate", "labels": [{ "name": "area: link" }] }
 ]

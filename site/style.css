@@ -73,6 +73,26 @@ td progress {
   color: var(--muted);
 }
 
+.work {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.repo {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.warn {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--wait);
+  color: var(--wait);
+}
+
+.warn[hidden] {
+  display: none;
+}
+
 .ci {
   font-weight: 600;
 }

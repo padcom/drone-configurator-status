@@ -2,10 +2,15 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src https://api.github.com; base-uri 'none'; form-action 'none'"
+    />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta http-equiv="refresh" content="900" />
     <title>Drone Configurator: status</title>
     <link rel="stylesheet" href="style.css" />
+    <script type="module" src="app.js"></script>
   </head>
   <body>
     <main>
@@ -15,6 +20,27 @@
       <section>
         <h2>Overall</h2>
         {{overall}}
+      </section>
+
+      <section>
+        <h2>In progress</h2>
+        <div data-work-label="in progress">{{work_in_progress}}</div>
+      </section>
+
+      <section>
+        <h2>In review</h2>
+        <div data-work-label="in review">{{work_in_review}}</div>
+      </section>
+
+      <section>
+        <h2>Testing</h2>
+        <div data-work-label="testing">{{work_testing}}</div>
+        <p class="notes">
+          Open issues with the label <code>in progress</code>, <code>in review</code> or <code>testing</code> in
+          {{work_repos}}.
+          <span id="work-updated">{{work_note}}</span>
+        </p>
+        <p id="work-notice" class="warn" role="status" hidden></p>
       </section>
 
       <section>
