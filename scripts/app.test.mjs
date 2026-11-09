@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import {
   CACHE_KEY,
   LISTS,
+  MAX_ITEMS,
   REFRESH_MS,
   TTL_MS,
   cleanItem,
@@ -15,6 +16,7 @@ import {
   refresh,
   renderItems,
   searchPath,
+  searchResult,
   start,
   storageOf,
   updatedText,
@@ -151,6 +153,76 @@ test('reads a missing, broken or hostile cache as no cache', () => {
   const stored = JSON.stringify({ at: NOW, lists: { 'in progress': [item(1), { ...item(2), url: 'javascript:alert(1)' }, 'x'], 'other': [item(3)] } })
   const cached = readCache(memoryStorage({ [CACHE_KEY]: stored }), NOW)
   assert.deepEqual(cached.lists, { 'in progress': [item(1)] })
+})
+
+test('treats a partial search result (incomplete_results) as a failed search: the last result stays, nothing is cached', async () => {
+  const last = { 'in progress': [item(1)], 'in review': [item(2)], 'testing': [] }
+  const partial = { total_count: 9, incomplete_results: true, items: [] }
+  const storage = memoryStorage()
+  const fetchImpl = searchFetch(await allFixtures(), { 'in review': [200, partial] })
+  const result = await refresh({ fetchImpl, storage, now: NOW + 1000, lists: last, at: NOW })
+  assert.match(result.notice, /could not be reached/u)
+  assert.deepEqual(result.lists['in review'], [item(2)])
+  assert.equal(result.at, NOW)
+  assert.equal(storage.data.size, 0)
+})
+
+test('accepts an entry only for a team repository, linking to exactly that issue', () => {
+  assert.equal(cleanItem({ ...item(1), repo: 'padcom/other-project', url: 'https://github.com/padcom/other-project/issues/1' }), null)
+  // Right repository and number in the name, a link somewhere else on github.com.
+  assert.equal(cleanItem({ ...item(1), url: 'https://github.com/evil/phish' }), null)
+  assert.equal(cleanItem({ ...item(1), url: 'https://github.com/padcom/pico-desktop/issues/1' }), null)
+  assert.equal(cleanItem({ ...item(1), url: 'https://github.com/padcom/pico-lang/issues/2' }), null)
+  assert.equal(cleanItem({ ...item(1), url: 'https://github.com/padcom/pico-lang/pull/1' }), null)
+  assert.equal(cleanItem({ ...item(1), url: 'https://github.com/padcom/pico-lang/issues/1#x' }), null)
+  assert.deepEqual(cleanItem(item(1)), item(1))
+  // The same holds for what a search returns and for what a cache holds.
+  const search = { items: [{ number: 1, title: 't', html_url: 'https://github.com/evil/phish', repository_url: 'https://api.github.com/repos/padcom/pico-lang' }] }
+  assert.deepEqual(itemsOf(search), [])
+  const stored = JSON.stringify({ at: NOW, lists: { 'in progress': [{ ...item(1), url: 'https://github.com/evil/phish' }] } })
+  assert.deepEqual(readCache(memoryStorage({ [CACHE_KEY]: stored }), NOW).lists, { 'in progress': [] })
+})
+
+test('lists at most MAX_ITEMS entries and says how many more there are', () => {
+  const many = Array.from({ length: 60 }, (_, i) => ({
+    number: i + 1,
+    title: `Issue ${i + 1}`,
+    html_url: `https://github.com/padcom/pico-lang/issues/${i + 1}`,
+    repository_url: 'https://api.github.com/repos/padcom/pico-lang',
+  }))
+  const result = searchResult({ total_count: 130, incomplete_results: false, items: many })
+  assert.equal(result.items.length, MAX_ITEMS)
+  assert.equal(result.more, 80)
+  const html = renderItems(result.items, result.more)
+  assert.equal(html.match(/<li>/gu).length, MAX_ITEMS)
+  assert.match(html, /<p class="more">and 80 more<\/p>/u)
+  // Nothing is added when everything is shown, or the count is not a number.
+  assert.equal(searchResult({ total_count: 2, items: many.slice(0, 2) }).more, 0)
+  assert.equal(searchResult({ total_count: 'lots', items: many.slice(0, 2) }).more, 0)
+  assert.ok(!renderItems([item(1)], 0).includes('more'))
+  assert.ok(!renderItems([item(1)], -3).includes('more'))
+  assert.ok(!renderItems([item(1)], '<b>').includes('<b>'))
+  // A hostile cache can neither list more than MAX_ITEMS nor show a count that is not a number.
+  const stored = JSON.stringify({
+    at: NOW,
+    lists: { 'in progress': Array.from({ length: 80 }, (_, i) => item(i + 1)) },
+    more: { 'in progress': '<img src=x>' },
+  })
+  const cached = readCache(memoryStorage({ [CACHE_KEY]: stored }), NOW)
+  assert.equal(cached.lists['in progress'].length, MAX_ITEMS)
+  assert.equal(cached.more['in progress'], 0)
+})
+
+test('keeps how many more there are in the cache, and shows it on the page', async () => {
+  const storage = memoryStorage()
+  const fixtures = await allFixtures()
+  fixtures['in review'] = { ...fixtures['in review'], total_count: 40 }
+  const result = await refresh({ fetchImpl: searchFetch(fixtures), storage, now: NOW })
+  assert.equal(result.more['in review'], 39)
+  assert.equal(readCache(storage, NOW).more['in review'], 39)
+  const page = harness({ fetchImpl: searchFetch(fixtures), storage: null })
+  await page.settle()
+  assert.match(page.document.lists[1].innerHTML, /and 39 more/u)
 })
 
 test('a cache from the future is treated as just fetched', () => {
