@@ -8,9 +8,11 @@ import {
   CACHE_KEY,
   LISTS,
   MAX_ITEMS,
+  PartialResultError,
   REFRESH_MS,
   TTL_MS,
   cleanItem,
+  countOf,
   itemsOf,
   readCache,
   refresh,
@@ -211,6 +213,33 @@ test('lists at most MAX_ITEMS entries and says how many more there are', () => {
   const cached = readCache(memoryStorage({ [CACHE_KEY]: stored }), NOW)
   assert.equal(cached.lists['in progress'].length, MAX_ITEMS)
   assert.equal(cached.more['in progress'], 0)
+})
+
+test('counts as "more" only what is not shown and could be found on GitHub, not what was rejected', async () => {
+  // The fixture has 3 results, one with a javascript: link: 2 are listed, nothing is hidden or "more".
+  const found = searchResult(await fixture('in-progress'))
+  assert.equal(found.items.length, 2)
+  assert.equal(found.more, 0)
+  assert.ok(!renderItems(found.items, found.more).includes('more'))
+  // 5 matches, 3 returned (one rejected): 2 were not returned, so "and 2 more".
+  const some = await fixture('in-progress')
+  assert.equal(searchResult({ ...some, total_count: 5 }).more, 2)
+  // The API's own limit: never more than 1000.
+  assert.equal(searchResult({ ...some, total_count: 50_000 }).more, 997)
+  assert.equal(countOf(50_000), 1000)
+  assert.equal(countOf(-1), 0)
+})
+
+test('does not say "Nothing here" when entries exist that are not listed', () => {
+  assert.match(renderItems([], 4), /and 4 more/u)
+  assert.ok(!renderItems([], 4).includes('Nothing here'))
+  assert.ok(!renderItems([{ ...item(1), url: 'javascript:alert(1)' }], 2).includes('Nothing here'))
+  assert.match(renderItems([], 0), /Nothing here/u)
+})
+
+test('a partial search result is a PartialResultError, not a message to match on', () => {
+  assert.throws(() => searchResult({ incomplete_results: true, total_count: 1, items: [] }), PartialResultError)
+  assert.throws(() => searchResult({ incomplete_results: true, total_count: 1, items: [] }), { name: 'PartialResultError' })
 })
 
 test('keeps how many more there are in the cache, and shows it on the page', async () => {

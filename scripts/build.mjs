@@ -9,7 +9,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { LISTS, REPOS, escapeHtml, renderItems, safeUrl, searchPath, searchResult } from '../site/app.js'
+import { LISTS, PartialResultError, REPOS, escapeHtml, renderItems, safeUrl, searchPath, searchResult } from '../site/app.js'
 
 // The escaping and the lists are the page script's own (site/app.js), so the snapshot in the HTML and what the script
 // draws later are made by the same code.
@@ -380,7 +380,7 @@ export function githubClient({ token, fetchImpl = fetch, pause = sleep, log = ()
         try {
           return searchResult(await get(searchPath(label)))
         } catch (error) {
-          if (attempt > 0 || !error.message.includes('partial')) {
+          if (attempt > 0 || !(error instanceof PartialResultError)) {
             throw error
           }
           await pause(5000)

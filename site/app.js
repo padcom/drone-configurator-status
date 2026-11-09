@@ -81,8 +81,8 @@ export function cleanItem(item) {
   return { repo, number, title: item.title.slice(0, MAX_TITLE), url }
 }
 
-/** The entries of a search response, at most `MAX_ITEMS`; pull requests, and anything malformed, are left out. */
-export function itemsOf(response) {
+/** The entries of a search response, at most `limit` (`MAX_ITEMS`); pull requests, and anything malformed, are left out. */
+export function itemsOf(response, limit = MAX_ITEMS) {
   const found = Array.isArray(response?.items) ? response.items : []
   return found
     .filter(i => i && !i.pull_request)
@@ -93,43 +93,61 @@ export function itemsOf(response) {
       url: i.html_url,
     }))
     .filter(Boolean)
-    .slice(0, MAX_ITEMS)
+    .slice(0, limit)
 }
 
-/** A count that is safe to show: a whole number of at least 0, else 0. */
+/** The Search API never reports more than this many results for a query. */
+export const MAX_RESULTS = 1000
+
+/** A count that is safe to show: a whole number from 0 to `MAX_RESULTS`, else 0. */
 export function countOf(value) {
-  return Number.isInteger(value) && value > 0 ? value : 0
+  return Number.isInteger(value) && value > 0 ? Math.min(value, MAX_RESULTS) : 0
+}
+
+/** A search whose result GitHub says is partial (`incomplete_results`: its query timed out). */
+export class PartialResultError extends Error {
+  constructor() {
+    super('GitHub returned a partial search result')
+    this.name = 'PartialResultError'
+  }
 }
 
 /**
- * A search response as a list: its entries, and how many more there are than were returned.
+ * A search response as a list: its entries (at most `MAX_ITEMS`), and how many more there are.
  *
- * @throws Error if GitHub says the result is partial (`incomplete_results`: its query timed out). A partial list
- *   must not replace a good one, so it counts as a failed search.
+ * "More" counts what the reader cannot see but could find on GitHub: results the API did not return (`total_count`
+ * beyond the entries it returned, at most `MAX_RESULTS`) and valid entries cut by `MAX_ITEMS`. An entry that was
+ * returned but is not a valid issue of a team repository is neither shown nor counted.
+ *
+ * @throws PartialResultError a partial list must not replace a good one, so it counts as a failed search.
  */
 export function searchResult(response) {
   if (response?.incomplete_results === true) {
-    throw new Error('GitHub returned a partial search result')
+    throw new PartialResultError()
   }
-  const items = itemsOf(response)
-  const total = Number.isInteger(response?.total_count) ? response.total_count : items.length
-  return { items, more: countOf(total - items.length) }
+  const valid = itemsOf(response, Infinity)
+  const items = valid.slice(0, MAX_ITEMS)
+  const returned = Array.isArray(response?.items) ? response.items.length : 0
+  const notReturned = countOf(response?.total_count) - returned
+  return { items, more: countOf(Math.max(0, notReturned) + valid.length - items.length) }
 }
 
 /** The HTML of one list: repository, number as a link, title, and "and N more" if the list is longer. All escaped. */
 export function renderItems(items, more = 0) {
-  if (!items || items.length === 0) {
-    return '<p class="empty">Nothing here.</p>'
-  }
-  const rows = items.slice(0, MAX_ITEMS).map(i => {
+  const rest = countOf(more)
+  const rows = (items ?? []).slice(0, MAX_ITEMS).map(i => {
     const item = cleanItem(i)
     if (item === null) {
       return ''
     }
     return `<li><span class="repo">${escapeHtml(item.repo)}</span> <a href="${escapeHtml(item.url)}">#${item.number}</a> ${escapeHtml(item.title)}</li>`
-  })
-  const rest = countOf(more)
-  return `<ul class="work">${rows.join('')}</ul>${rest > 0 ? `<p class="more">and ${rest} more</p>` : ''}`
+  }).filter(Boolean)
+  const tail = rest > 0 ? `<p class="more">and ${rest} more</p>` : ''
+  if (rows.length === 0) {
+    // Nothing to list is "Nothing here" only if there is nothing more either.
+    return tail || '<p class="empty">Nothing here.</p>'
+  }
+  return `<ul class="work">${rows.join('')}</ul>${tail}`
 }
 
 // ---------------------------------------------------------------------------------------------------------

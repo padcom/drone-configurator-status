@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { searchResult } from '../site/app.js'
 import { build, collect, escapeHtml, fixtureSource, githubClient, reduceChecks, render, safeUrl, summarize } from './build.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -371,6 +372,29 @@ test('the snapshot says "and N more" when a list is longer than what is shown', 
   const html = render(summarize(data.issues, data.pulls, data.checks, NOW, data.work, { 'in review': 7 }), await readFile(join(HERE, '..', 'site', 'index.html'), 'utf8'))
   assert.match(html, /data-work-label="in review">.*<p class="more">and 7 more<\/p>/su)
   assert.ok(!/and \d+ more/u.test(/data-work-label="testing">(.*?)<\/div>/su.exec(html)[1]))
+})
+
+test('the offline build shows 50 of 80 returned entries and "and 30 more"; a rejected entry is not "more"', async () => {
+  const entry = n => ({
+    number: n,
+    title: `Issue ${n}`,
+    html_url: `https://github.com/padcom/pico-lang/issues/${n}`,
+    repository_url: 'https://api.github.com/repos/padcom/pico-lang',
+  })
+  const eighty = { total_count: 80, incomplete_results: false, items: Array.from({ length: 80 }, (_, i) => entry(i + 1)) }
+  const base = fixtureSource(FIXTURES)
+  const source = { ...base, labelled: async label => label === 'testing' ? searchResult(eighty) : base.labelled(label) }
+  const out = join(await mkdtemp(join(tmpdir(), 'status-')), 'dist')
+  await build({ source, out, minIssues: 1, now: NOW })
+
+  const html = await readFile(join(out, 'index.html'), 'utf8')
+  const section = label => new RegExp(`data-work-label="${label}">(.*?)</div>`, 'su').exec(html)[1]
+  assert.equal(section('testing').match(/<li>/gu).length, 50)
+  assert.match(section('testing'), /<p class="more">and 30 more<\/p>/u)
+  // The in-progress fixture returns 3 entries, one with a javascript: link: 2 listed, and no "more".
+  assert.equal(section('in progress').match(/<li>/gu).length, 2)
+  assert.ok(!section('in progress').includes('more'))
+  assert.equal(JSON.parse(await readFile(join(out, 'data.json'), 'utf8')).workMore.testing, 30)
 })
 
 test('reads every page of issues, until a short one', async () => {
